@@ -83,6 +83,8 @@ OPT_USER=0      # Set to '1' if the user specifies '--user'.
 OPT_UNINSTALL=0 # Set to '1' if the user specifies '--uninstall'.
 OPT_AOSA=0      # Set to '1' if the user specifies '--setupAllOfficiallySupportedApps'.
 OPT_ADD_APPS=0  # Set to '1' if the user specifies '--add-apps'.
+OPT_DIAG=0      # Set to '1' if the user specifies '--diagnose-rdp-drive'.
+OPT_START_RDP=0 # Set to '1' if the user specifies '--start-rdp-session'.
 
 # WINAPPS CONFIGURATION FILE
 RDP_USER=""          # Imported variable.
@@ -93,6 +95,9 @@ VM_NAME="RDPWindows" # Name of the Windows VM (FOR 'libvirt' ONLY).
 WAFLAVOR="docker"    # Imported variable.
 RDP_SCALE=100        # Imported variable.
 RDP_FLAGS=""         # Imported variable.
+RDP_FLAGS_WINDOWS=""     # Imported variable.
+RDP_FLAGS_NON_WINDOWS="" # Imported variable.
+RDP_FLAGS_SETUP_SAFE=""  # Derived variable used by setup checks and scans.
 DEBUG="true"         # Imported variable.
 FREERDP_COMMAND=""   # Imported variable.
 
@@ -140,6 +145,10 @@ function waUsage() {
   ${COMMAND_TEXT}    --system --uninstall${CLEAR_TEXT}                          # Uninstall everything in /usr
   ${COMMAND_TEXT}    --user --add-apps${CLEAR_TEXT}                             # Add new applications to existing installation in ${HOME}
   ${COMMAND_TEXT}    --system --add-apps${CLEAR_TEXT}                           # Add new applications to existing installation in /usr
+    ${COMMAND_TEXT}    --user --diagnose-rdp-drive${CLEAR_TEXT}                   # Diagnose RDP drive redirection/write-back for current user
+    ${COMMAND_TEXT}    --system --diagnose-rdp-drive${CLEAR_TEXT}                 # Diagnose RDP drive redirection/write-back for system install
+    ${COMMAND_TEXT}    --user --start-rdp-session${CLEAR_TEXT}                    # Start an interactive full Windows RDP session
+    ${COMMAND_TEXT}    --system --start-rdp-session${CLEAR_TEXT}                  # Start an interactive full Windows RDP session
   ${COMMAND_TEXT}    --help${CLEAR_TEXT}                                        # Display this usage message."
 }
 
@@ -149,9 +158,49 @@ function waUsage() {
 function waGetSourceCode() {
     # Declare variables.
     local SCRIPT_DIR_PATH="" # Stores the absolute path of the directory containing the script.
+    local SCRIPT_SOURCE_VALID=1 # Set to '0' if the directory containing this script is a valid WinApps source tree.
+    local GIT_TOPLEVEL=""      # Stores the Git toplevel path for the directory containing this script.
 
     # Determine the absolute path to the directory containing the script.
     SCRIPT_DIR_PATH=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
+
+    # Verify whether the script is being executed from a valid WinApps source tree.
+    if [[ -f "$SCRIPT_DIR_PATH/setup.sh" && -f "$SCRIPT_DIR_PATH/bin/winapps" && -d "$SCRIPT_DIR_PATH/apps" && -d "$SCRIPT_DIR_PATH/install" ]]; then
+        if git -C "$SCRIPT_DIR_PATH" rev-parse --show-toplevel &>/dev/null; then
+            GIT_TOPLEVEL=$(git -C "$SCRIPT_DIR_PATH" rev-parse --show-toplevel 2>/dev/null)
+            if [[ "$GIT_TOPLEVEL" == "$SCRIPT_DIR_PATH" ]]; then
+                SCRIPT_SOURCE_VALID=0
+            fi
+        fi
+    fi
+
+    # If this script is being executed from a verified source tree, reuse it and skip clone/pull.
+    if [[ "$SCRIPT_SOURCE_VALID" -eq 0 ]]; then
+        SOURCE_PATH="$SCRIPT_DIR_PATH"
+        echo -e "${INFO_TEXT}Verified local WinApps source at ${CLEAR_TEXT}${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT}${INFO_TEXT}. Skipping clone/update.${CLEAR_TEXT}"
+
+        # Silently change the working directory.
+        if ! cd "$SOURCE_PATH" &>/dev/null; then
+            # Display the error type.
+            echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}DIRECTORY CHANGE FAILURE.${CLEAR_TEXT}"
+
+            # Display error details.
+            echo -e "${INFO_TEXT}Failed to change the working directory to ${CLEAR_TEXT}${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT}${INFO_TEXT}.${CLEAR_TEXT}"
+
+            # Display the suggested action(s).
+            echo "--------------------------------------------------------------------------------"
+            echo "Ensure:"
+            echo -e "  - ${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT} exists."
+            echo -e "  - ${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT} has been cloned and checked out properly."
+            echo -e "  - The current user has sufficient permissions to access and write to ${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT}."
+            echo "--------------------------------------------------------------------------------"
+
+            # Terminate the script.
+            return "$EC_FAILED_CD"
+        fi
+
+        return 0
+    fi
 
     # Check if winapps is currently installed on $SOURCE_PATH
     if [[ -f "$SCRIPT_DIR_PATH/winapps" && "$SCRIPT_DIR_PATH" != "$SOURCE_PATH" ]]; then
@@ -233,6 +282,12 @@ function waCheckInput() {
                 ;;
             "--add-apps")
                 OPT_ADD_APPS=1
+                ;;
+            "--diagnose-rdp-drive")
+                OPT_DIAG=1
+                ;;
+            "--start-rdp-session")
+                OPT_START_RDP=1
                 ;;
             "--help")
                 waUsage
@@ -356,6 +411,43 @@ function waCheckInput() {
         echo "--------------------------------------------------------------------------------"
 
         # Terminate the script.
+        return "$EC_BAD_ARGUMENT"
+    fi
+
+    # Diagnostic mode conflicts with install/uninstall/app-add actions.
+    if [ "$OPT_DIAG" -eq 1 ] && { [ "$OPT_UNINSTALL" -eq 1 ] || [ "$OPT_AOSA" -eq 1 ] || [ "$OPT_ADD_APPS" -eq 1 ]; }; then
+        # Display the error type.
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}CONFLICTING ARGUMENTS.${CLEAR_TEXT}"
+
+        # Display the error details.
+        echo -e "${INFO_TEXT}The option${CLEAR_TEXT} ${COMMAND_TEXT}--diagnose-rdp-drive${CLEAR_TEXT} ${INFO_TEXT}cannot be combined with installation action flags.${CLEAR_TEXT}"
+
+        # Display the suggested action(s).
+        echo "--------------------------------------------------------------------------------"
+        waUsage
+        echo "--------------------------------------------------------------------------------"
+
+        # Terminate the script.
+        return "$EC_BAD_ARGUMENT"
+    fi
+
+    # RDP session starter mode conflicts with install/uninstall/app-add actions.
+    if [ "$OPT_START_RDP" -eq 1 ] && { [ "$OPT_UNINSTALL" -eq 1 ] || [ "$OPT_AOSA" -eq 1 ] || [ "$OPT_ADD_APPS" -eq 1 ]; }; then
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}CONFLICTING ARGUMENTS.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}The option${CLEAR_TEXT} ${COMMAND_TEXT}--start-rdp-session${CLEAR_TEXT} ${INFO_TEXT}cannot be combined with installation action flags.${CLEAR_TEXT}"
+        echo "--------------------------------------------------------------------------------"
+        waUsage
+        echo "--------------------------------------------------------------------------------"
+        return "$EC_BAD_ARGUMENT"
+    fi
+
+    # Diagnostic mode and RDP session starter mode cannot be combined.
+    if [ "$OPT_DIAG" -eq 1 ] && [ "$OPT_START_RDP" -eq 1 ]; then
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}CONFLICTING ARGUMENTS.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}You cannot specify both${CLEAR_TEXT} ${COMMAND_TEXT}--diagnose-rdp-drive${CLEAR_TEXT} ${INFO_TEXT}and${CLEAR_TEXT} ${COMMAND_TEXT}--start-rdp-session${CLEAR_TEXT} ${INFO_TEXT}simultaneously.${CLEAR_TEXT}"
+        echo "--------------------------------------------------------------------------------"
+        waUsage
+        echo "--------------------------------------------------------------------------------"
         return "$EC_BAD_ARGUMENT"
     fi
 
@@ -560,6 +652,23 @@ function waLoadConfig() {
         # Load the WinApps configuration file.
         # shellcheck source=/dev/null # Exclude this file from being checked by ShellCheck.
         source "$CONFIG_PATH"
+
+        # Backward compatibility: older config files use a single 'RDP_FLAGS' value.
+        # Prefer session-specific flags when provided.
+        if [[ -z "$RDP_FLAGS_NON_WINDOWS" && -n "$RDP_FLAGS" ]]; then
+            RDP_FLAGS_NON_WINDOWS="$RDP_FLAGS"
+        fi
+
+        # Setup-safe flag set for RemoteApp checks/scans.
+        # Strip modern flags that can cause issues on older Windows versions (e.g., 8.1).
+        RDP_FLAGS_SETUP_SAFE=$(echo "$RDP_FLAGS_NON_WINDOWS" | sed -E \
+            -e 's/(^|[[:space:]])\+dynamic-resolution([[:space:]]|$)/ /g' \
+            -e 's/(^|[[:space:]])\+async-update([[:space:]]|$)/ /g' \
+            -e 's/(^|[[:space:]])\/gfx:[^[:space:]]+([[:space:]]|$)/ /g' \
+            -e 's/(^|[[:space:]])\/gdi:hw([[:space:]]|$)/ /g' \
+            -e 's/[[:space:]]+/ /g' \
+            -e 's/^[[:space:]]+//' \
+            -e 's/[[:space:]]+$//')
     fi
 
     # Print feedback.
@@ -705,14 +814,14 @@ function waCheckInstallDependencies() {
         return "$EC_MISSING_DEPS"
     fi
 
-    # 'FreeRDP' (Version 3).
+    # 'FreeRDP' (Version 2+).
     # Attempt to set a FreeRDP command if the command variable is empty.
     if [ -z "$FREERDP_COMMAND" ]; then
         # Check common commands used to launch FreeRDP.
         if command -v xfreerdp &>/dev/null; then
-            # Check FreeRDP major version is 3 or greater.
+            # Check FreeRDP major version is 2 or greater.
             FREERDP_MAJOR_VERSION=$(xfreerdp --version | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
-            if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
+            if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 2)); then
                 FREERDP_COMMAND="xfreerdp"
             fi
         fi
@@ -720,9 +829,9 @@ function waCheckInstallDependencies() {
         # Check for xfreerdp3 command as a fallback option.
         if [ -z "$FREERDP_COMMAND" ]; then
             if command -v xfreerdp3 &>/dev/null; then
-                # Check FreeRDP major version is 3 or greater.
+                # Check FreeRDP major version is 2 or greater.
                 FREERDP_MAJOR_VERSION=$(xfreerdp3 --version | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
-                if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
+                if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 2)); then
                     FREERDP_COMMAND="xfreerdp3"
                 fi
             fi
@@ -732,9 +841,9 @@ function waCheckInstallDependencies() {
         if [ -z "$FREERDP_COMMAND" ]; then
             if command -v flatpak &>/dev/null; then
                 if flatpak list --columns=application | grep -q "^com.freerdp.FreeRDP$"; then
-                    # Check FreeRDP major version is 3 or greater.
+                    # Check FreeRDP major version is 2 or greater.
                     FREERDP_MAJOR_VERSION=$(flatpak list --columns=application,version | grep "^com.freerdp.FreeRDP" | awk '{print $2}' | cut -d'.' -f1)
-                    if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
+                    if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 2)); then
                         FREERDP_COMMAND="flatpak run --command=xfreerdp com.freerdp.FreeRDP"
                     fi
                 fi
@@ -750,7 +859,7 @@ function waCheckInstallDependencies() {
         echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}MISSING DEPENDENCIES.${CLEAR_TEXT}"
 
         # Display the error details.
-        echo -e "${INFO_TEXT}Please install 'FreeRDP' version 3 to proceed.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}Please install 'FreeRDP' version 2 or newer to proceed.${CLEAR_TEXT}"
 
         # Display the suggested action(s).
         echo "--------------------------------------------------------------------------------"
@@ -869,6 +978,63 @@ function waCheckInstallDependencies() {
 
     # Print feedback.
     echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+}
+
+# Name: 'waGetFreeRDPMajorVersion'
+# Role: Determine the FreeRDP major version for a command string.
+function waGetFreeRDPMajorVersion() {
+    local FREERDP_CMD="$1"
+    local MAJOR_VERSION="0"
+
+    # Podman wrapper support.
+    if [[ "$FREERDP_CMD" == podman\ unshare\ --rootless-netns\ * ]]; then
+        FREERDP_CMD="${FREERDP_CMD#podman unshare --rootless-netns }"
+    fi
+
+    if [ "$FREERDP_CMD" = "flatpak run --command=xfreerdp com.freerdp.FreeRDP" ]; then
+        if command -v flatpak &>/dev/null; then
+            MAJOR_VERSION=$(flatpak list --columns=application,version | grep "^com.freerdp.FreeRDP" | awk '{print $2}' | cut -d'.' -f1)
+        fi
+    elif command -v "$FREERDP_CMD" &>/dev/null; then
+        MAJOR_VERSION=$($FREERDP_CMD --version 2>/dev/null | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
+    fi
+
+    if [[ ! $MAJOR_VERSION =~ ^[0-9]+$ ]]; then
+        MAJOR_VERSION="0"
+    fi
+
+    echo "$MAJOR_VERSION"
+}
+
+# Name: 'waBuildAuthPkgArgs'
+# Role: Build auth package filter arguments only for FreeRDP v3+.
+function waBuildAuthPkgArgs() {
+    local FREERDP_CMD="$1"
+    local FREERDP_MAJOR_VERSION="0"
+
+    WA_AUTH_PKG_ARGS=()
+    FREERDP_MAJOR_VERSION=$(waGetFreeRDPMajorVersion "$FREERDP_CMD")
+    if (( FREERDP_MAJOR_VERSION >= 3 )); then
+        WA_AUTH_PKG_ARGS=("/auth-pkg-list:!kerberos")
+    fi
+}
+
+# Name: 'waBuildRemoteAppArgs'
+# Role: Build FreeRDP RemoteApp arguments compatible with v2 and v3 syntax.
+function waBuildRemoteAppArgs() {
+    local FREERDP_CMD="$1"
+    local APP_PROGRAM="$2"
+    local APP_CMD="$3"
+    local FREERDP_MAJOR_VERSION="0"
+
+    WA_REMOTEAPP_ARGS=()
+    FREERDP_MAJOR_VERSION=$(waGetFreeRDPMajorVersion "$FREERDP_CMD")
+
+    if (( FREERDP_MAJOR_VERSION >= 3 )); then
+        WA_REMOTEAPP_ARGS=("/app:program:${APP_PROGRAM},cmd:${APP_CMD}")
+    else
+        WA_REMOTEAPP_ARGS=("/app:${APP_PROGRAM}" "/app-cmd:${APP_CMD}")
+    fi
 }
 
 # Name: 'waCheckGroupMembership'
@@ -1097,91 +1263,333 @@ function waCheckRDPAccess() {
     local FREERDP_LOG=""  # Stores the path of the FreeRDP log file.
     local FREERDP_PROC="" # Stores the FreeRDP process ID.
     local ELAPSED_TIME="" # Stores the time counter.
+    local PRIMARY_FREERDP_COMMAND="$FREERDP_COMMAND"
+    local FALLBACK_FREERDP_COMMAND=""
+    local CURRENT_FREERDP_COMMAND=""
+    local ATTEMPT_COUNT=0
 
-    # Log file path.
-    FREERDP_LOG="${USER_APPDATA_PATH}/FreeRDP_Test_$(date +'%Y%m%d_%H%M_%N').log"
+    # Some systems have both xfreerdp and xfreerdp3, and one may be more stable for RemoteApp checks.
+    # Keep configured/autodetected command as primary and only fallback to the sibling command when available.
+    if [ "$PRIMARY_FREERDP_COMMAND" = "xfreerdp" ] && command -v xfreerdp3 &>/dev/null; then
+        FALLBACK_FREERDP_COMMAND="xfreerdp3"
+    elif [ "$PRIMARY_FREERDP_COMMAND" = "xfreerdp3" ] && command -v xfreerdp &>/dev/null; then
+        FALLBACK_FREERDP_COMMAND="xfreerdp"
+    fi
 
-    # Ensure the output directory exists.
+    # Try primary command first, then fallback command if needed.
+    for CURRENT_FREERDP_COMMAND in "$PRIMARY_FREERDP_COMMAND" "$FALLBACK_FREERDP_COMMAND"; do
+        if [ -z "$CURRENT_FREERDP_COMMAND" ]; then
+            continue
+        fi
+
+        ATTEMPT_COUNT=$((ATTEMPT_COUNT + 1))
+
+        # Log file path.
+        FREERDP_LOG="${USER_APPDATA_PATH}/FreeRDP_Test_$(date +'%Y%m%d_%H%M_%N')_${CURRENT_FREERDP_COMMAND}.log"
+
+        # Ensure the output directory exists.
+        mkdir -p "$USER_APPDATA_PATH"
+
+        # Remove existing 'FreeRDP Connection Test' file.
+        rm -f "$TEST_PATH"
+
+        # This command should create a file on the host filesystem before terminating the RDP session. This command is silently executed as a background process.
+        # If the file is created, it means Windows received the command via FreeRDP successfully and can read and write to the Linux home folder.
+        # Note: The following final line is expected within the log, indicating successful execution of the 'tsdiscon' command and termination of the RDP session.
+        # [INFO][com.freerdp.core] - [rdp_print_errinfo]: ERRINFO_LOGOFF_BY_USER (0x0000000C):The disconnection was initiated by the user logging off their session on the server.
+        waBuildAuthPkgArgs "$CURRENT_FREERDP_COMMAND"
+        waBuildRemoteAppArgs "$CURRENT_FREERDP_COMMAND" "C:\Windows\System32\cmd.exe" "/C copy /Y NUL $TEST_PATH_WIN >NUL && tsdiscon"
+        # shellcheck disable=SC2140,SC2027,SC2086 # Disable warnings regarding unquoted strings.
+        $CURRENT_FREERDP_COMMAND \
+            $RDP_FLAGS_SETUP_SAFE \
+            /cert:tofu \
+            "${WA_AUTH_PKG_ARGS[@]}" \
+            /d:"$RDP_DOMAIN" \
+            /u:"$RDP_USER" \
+            /p:"$RDP_PASS" \
+            /scale:"$RDP_SCALE" \
+            +auto-reconnect \
+            +home-drive \
+            "${WA_REMOTEAPP_ARGS[@]}" \
+            /v:"$RDP_IP" &>"$FREERDP_LOG" &
+
+        # Store the FreeRDP process ID.
+        FREERDP_PROC=$!
+
+        # Initialise the time counter.
+        ELAPSED_TIME=0
+
+        # Wait a maximum of $RDP_TIMEOUT seconds for the background process to complete.
+        while [ "$ELAPSED_TIME" -lt "$RDP_TIMEOUT" ]; do
+            # Check if the FreeRDP process is complete or if the test file exists.
+            if ! ps -p "$FREERDP_PROC" &>/dev/null || [ -f "$TEST_PATH" ]; then
+                break
+            fi
+
+            # Wait for 5 seconds.
+            sleep 5
+            ELAPSED_TIME=$((ELAPSED_TIME + 5))
+        done
+
+        # Check if FreeRDP process is not complete.
+        if ps -p "$FREERDP_PROC" &>/dev/null; then
+            # SIGKILL FreeRDP.
+            kill -9 "$FREERDP_PROC" &>/dev/null
+        fi
+
+        # A successful marker means this command worked.
+        if [ -f "$TEST_PATH" ]; then
+            rm -f "$TEST_PATH"
+            FREERDP_COMMAND="$CURRENT_FREERDP_COMMAND"
+            echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+            return 0
+        fi
+
+        # Compatibility fallback: some Windows/RemoteApp combinations complete transport and drive registration,
+        # but fail to execute/write marker commands reliably in probe mode.
+        local HAS_DRIVE_REG=1
+        local HAS_CLEAN_LOGOFF=1
+        local HAS_REMOTEAPP_LIFECYCLE=1
+        local HAS_SESSION_ESTABLISHED=1
+
+        grep -q -E "registered \[[[:space:]]*drive\] device #[0-9]+:[[:space:]]+home|Loading device service drive \[home\]" "$FREERDP_LOG" || HAS_DRIVE_REG=$?
+        grep -q "ERRINFO_LOGOFF_BY_USER" "$FREERDP_LOG" || HAS_CLEAN_LOGOFF=$?
+        grep -q -E "xf_rail_server_system_param|client_auto_reconnect_ex|ERRCONNECT_CONNECT_TRANSPORT_FAILED" "$FREERDP_LOG" || HAS_REMOTEAPP_LIFECYCLE=$?
+        grep -q -E "gdi_init_ex]: Local framebuffer format|Loading device service drive \[home\]" "$FREERDP_LOG" || HAS_SESSION_ESTABLISHED=$?
+
+        # Prefer explicit clean RemoteApp completion. Some FreeRDP builds omit the exact drive-registration line.
+        # Also accept established-session markers to avoid false failures when logoff/marker write is delayed.
+        if [ "$HAS_CLEAN_LOGOFF" -eq 0 ] || [ "$HAS_SESSION_ESTABLISHED" -eq 0 ] || { [ "$HAS_DRIVE_REG" -eq 0 ] && [ "$HAS_REMOTEAPP_LIFECYCLE" -eq 0 ]; }; then
+            FREERDP_COMMAND="$CURRENT_FREERDP_COMMAND"
+            echo -e "${INFO_TEXT}Note:${CLEAR_TEXT} RDP session connected, but marker-file write was skipped (compatibility fallback)."
+            echo -e "${WARNING_TEXT}[WARNING]${CLEAR_TEXT} Continuing setup; if app scan fails, use ${COMMAND_TEXT}--start-rdp-session${CLEAR_TEXT} once, then rerun setup."
+            echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+            return 0
+        fi
+
+        # Show retry hint if we have an alternate command to test next.
+        if [ "$ATTEMPT_COUNT" -eq 1 ] && [ -n "$FALLBACK_FREERDP_COMMAND" ]; then
+            echo -e "${WARNING_TEXT}[WARNING]${CLEAR_TEXT} RDP probe with ${COMMAND_TEXT}${CURRENT_FREERDP_COMMAND}${CLEAR_TEXT} failed. Retrying with ${COMMAND_TEXT}${FALLBACK_FREERDP_COMMAND}${CLEAR_TEXT}..."
+        fi
+    done
+
+    # Complete the previous line.
+    echo -e "${FAIL_TEXT}Failed!${CLEAR_TEXT}\n"
+
+    # Display the error type.
+    echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}REMOTE DESKTOP PROTOCOL FAILURE.${CLEAR_TEXT}"
+
+    # Display the error details.
+    echo -e "${INFO_TEXT}FreeRDP failed to establish a connection with Windows.${CLEAR_TEXT}"
+    if [ -n "$FALLBACK_FREERDP_COMMAND" ]; then
+        echo -e "${INFO_TEXT}Tried commands:${CLEAR_TEXT} ${COMMAND_TEXT}${PRIMARY_FREERDP_COMMAND}${CLEAR_TEXT}${INFO_TEXT} and${CLEAR_TEXT} ${COMMAND_TEXT}${FALLBACK_FREERDP_COMMAND}${CLEAR_TEXT}${INFO_TEXT}.${CLEAR_TEXT}"
+    fi
+
+    # Display the suggested action(s).
+    echo "--------------------------------------------------------------------------------"
+    echo -e "Please view the log at ${COMMAND_TEXT}${FREERDP_LOG}${CLEAR_TEXT}."
+    echo "Troubleshooting Tips:"
+    echo "  - Ensure the user is logged out of Windows prior to initiating the WinApps installation."
+    echo "  - Ensure the credentials within the WinApps configuration file are correct."
+    echo -e "  - Utilise a new certificate by removing relevant certificate(s) in ${COMMAND_TEXT}${HOME}/.config/freerdp/server${CLEAR_TEXT}."
+    echo -e "  - Try increasing the ${COMMAND_TEXT}RDP_TIMEOUT${CLEAR_TEXT} in ${COMMAND_TEXT}${CONFIG_PATH}${CLEAR_TEXT}."
+    echo "  - If using 'libvirt', ensure the Windows VM is correctly named as specified within the README."
+    echo "  - If using 'libvirt', ensure 'Remote Desktop' is enabled within the Windows VM."
+    echo "  - If using 'libvirt', ensure you have merged 'RDPApps.reg' into the Windows VM's registry."
+    echo "  - If using 'libvirt', try logging into and back out of the Windows VM within 'virt-manager' prior to initiating the WinApps installation."
+    echo "--------------------------------------------------------------------------------"
+
+    # Terminate the script.
+    return "$EC_RDP_FAIL"
+}
+
+# Name: 'waDiagnoseRDPDrive'
+# Role: Runs a focused diagnostic for RDP drive redirection/write-back issues.
+function waDiagnoseRDPDrive() {
+    echo -e "${BOLD_TEXT}RDP Drive Redirection Diagnostic${CLEAR_TEXT}"
+
+    local DIAG_LOG=""
+    local DIAG_PROC=""
+    local ELAPSED_TIME=""
+    local DIAG_ROOT_PATH="${HOME}/winapps_rdp_diag_root"
+    local DIAG_NESTED_PATH="${USER_APPDATA_PATH}/winapps_rdp_diag_nested"
+    local DIAG_ROOT_PATH_WIN='\\tsclient\home\winapps_rdp_diag_root'
+    local DIAG_NESTED_PATH_WIN="${USER_APPDATA_PATH_WIN}\\winapps_rdp_diag_nested"
+
+    # Load config and prerequisites exactly as in setup mode.
+    waLoadConfig
+    waCheckInstallDependencies
+    waFixScale
+
+    if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
+        RDP_IP="$DOCKER_IP"
+    fi
+
+    if [ "$WAFLAVOR" = "podman" ]; then
+        FREERDP_COMMAND="podman unshare --rootless-netns ${FREERDP_COMMAND}"
+    fi
+
+    if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
+        waCheckContainerRunning
+    elif [ "$WAFLAVOR" = "libvirt" ]; then
+        waCheckGroupMembership
+        waCheckVMRunning
+    elif [ "$WAFLAVOR" = "manual" ]; then
+        :
+    else
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}INVALID WINAPPS BACKEND.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}An invalid WinApps backend '${WAFLAVOR}' was specified.${CLEAR_TEXT}"
+        return "$EC_INVALID_FLAVOR"
+    fi
+
+    waCheckPortOpen
     mkdir -p "$USER_APPDATA_PATH"
+    rm -f "$DIAG_ROOT_PATH" "$DIAG_NESTED_PATH"
 
-    # Remove existing 'FreeRDP Connection Test' file.
-    rm -f "$TEST_PATH"
+    DIAG_LOG="${USER_APPDATA_PATH}/FreeRDP_DriveDiag_$(date +'%Y%m%d_%H%M_%N').log"
 
-    # This command should create a file on the host filesystem before terminating the RDP session. This command is silently executed as a background process.
-    # If the file is created, it means Windows received the command via FreeRDP successfully and can read and write to the Linux home folder.
-    # Note: The following final line is expected within the log, indicating successful execution of the 'tsdiscon' command and termination of the RDP session.
-    # [INFO][com.freerdp.core] - [rdp_print_errinfo]: ERRINFO_LOGOFF_BY_USER (0x0000000C):The disconnection was initiated by the user logging off their session on the server.
-    # shellcheck disable=SC2140,SC2027,SC2086 # Disable warnings regarding unquoted strings.
+    echo -n "Running RemoteApp write-back probe... "
+    waBuildAuthPkgArgs "$FREERDP_COMMAND"
+    waBuildRemoteAppArgs "$FREERDP_COMMAND" "C:\Windows\System32\cmd.exe" "/C copy /Y NUL ${DIAG_ROOT_PATH_WIN} >NUL && copy /Y NUL ${DIAG_NESTED_PATH_WIN} >NUL && tsdiscon"
+    # shellcheck disable=SC2140,SC2027,SC2086
     $FREERDP_COMMAND \
-        $RDP_FLAGS_NON_WINDOWS \
+        $RDP_FLAGS_SETUP_SAFE \
         /cert:tofu \
+        "${WA_AUTH_PKG_ARGS[@]}" \
         /d:"$RDP_DOMAIN" \
         /u:"$RDP_USER" \
         /p:"$RDP_PASS" \
         /scale:"$RDP_SCALE" \
         +auto-reconnect \
         +home-drive \
-        /app:program:"C:\Windows\System32\cmd.exe",cmd:"/C type NUL > $TEST_PATH_WIN && tsdiscon" \
-        /v:"$RDP_IP" &>"$FREERDP_LOG" &
+        "${WA_REMOTEAPP_ARGS[@]}" \
+        /v:"$RDP_IP" &>"$DIAG_LOG" &
 
-    # Store the FreeRDP process ID.
-    FREERDP_PROC=$!
-
-    # Initialise the time counter.
+    DIAG_PROC=$!
     ELAPSED_TIME=0
 
-    # Wait a maximum of $RDP_TIMEOUT seconds for the background process to complete.
     while [ "$ELAPSED_TIME" -lt "$RDP_TIMEOUT" ]; do
-        # Check if the FreeRDP process is complete or if the test file exists.
-        if ! ps -p "$FREERDP_PROC" &>/dev/null || [ -f "$TEST_PATH" ]; then
+        if ! ps -p "$DIAG_PROC" &>/dev/null || [ -f "$DIAG_ROOT_PATH" ] || [ -f "$DIAG_NESTED_PATH" ]; then
             break
         fi
 
-        # Wait for 5 seconds.
         sleep 5
         ELAPSED_TIME=$((ELAPSED_TIME + 5))
     done
 
-    # Check if FreeRDP process is not complete.
-    if ps -p "$FREERDP_PROC" &>/dev/null; then
-        # SIGKILL FreeRDP.
-        kill -9 "$FREERDP_PROC" &>/dev/null
+    if ps -p "$DIAG_PROC" &>/dev/null; then
+        kill -9 "$DIAG_PROC" &>/dev/null
     fi
 
-    # Check if test file does not exist.
-    if ! [ -f "$TEST_PATH" ]; then
-        # Complete the previous line.
-        echo -e "${FAIL_TEXT}Failed!${CLEAR_TEXT}\n"
-
-        # Display the error type.
-        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}REMOTE DESKTOP PROTOCOL FAILURE.${CLEAR_TEXT}"
-
-        # Display the error details.
-        echo -e "${INFO_TEXT}FreeRDP failed to establish a connection with Windows.${CLEAR_TEXT}"
-
-        # Display the suggested action(s).
-        echo "--------------------------------------------------------------------------------"
-        echo -e "Please view the log at ${COMMAND_TEXT}${FREERDP_LOG}${CLEAR_TEXT}."
-        echo "Troubleshooting Tips:"
-        echo "  - Ensure the user is logged out of Windows prior to initiating the WinApps installation."
-        echo "  - Ensure the credentials within the WinApps configuration file are correct."
-        echo -e "  - Utilise a new certificate by removing relevant certificate(s) in ${COMMAND_TEXT}${HOME}/.config/freerdp/server${CLEAR_TEXT}."
-        echo -e "  - Try increasing the ${COMMAND_TEXT}RDP_TIMEOUT${CLEAR_TEXT} in ${COMMAND_TEXT}${CONFIG_PATH}${CLEAR_TEXT}."
-        echo "  - If using 'libvirt', ensure the Windows VM is correctly named as specified within the README."
-        echo "  - If using 'libvirt', ensure 'Remote Desktop' is enabled within the Windows VM."
-        echo "  - If using 'libvirt', ensure you have merged 'RDPApps.reg' into the Windows VM's registry."
-        echo "  - If using 'libvirt', try logging into and back out of the Windows VM within 'virt-manager' prior to initiating the WinApps installation."
-        echo "--------------------------------------------------------------------------------"
-
-        # Terminate the script.
-        return "$EC_RDP_FAIL"
-    else
-        # Remove the temporary test file.
-        rm -f "$TEST_PATH"
-    fi
-
-    # Print feedback.
     echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+
+    echo "--------------------------------------------------------------------------------"
+    echo -e "Diagnostic log: ${COMMAND_TEXT}${DIAG_LOG}${CLEAR_TEXT}"
+    if [ -f "$DIAG_ROOT_PATH" ]; then
+        echo -e "Root write (${COMMAND_TEXT}${DIAG_ROOT_PATH_WIN}${CLEAR_TEXT}): ${DONE_TEXT}PASS${CLEAR_TEXT}"
+    else
+        echo -e "Root write (${COMMAND_TEXT}${DIAG_ROOT_PATH_WIN}${CLEAR_TEXT}): ${FAIL_TEXT}FAIL${CLEAR_TEXT}"
+    fi
+
+    if [ -f "$DIAG_NESTED_PATH" ]; then
+        echo -e "Nested write (${COMMAND_TEXT}${DIAG_NESTED_PATH_WIN}${CLEAR_TEXT}): ${DONE_TEXT}PASS${CLEAR_TEXT}"
+    else
+        echo -e "Nested write (${COMMAND_TEXT}${DIAG_NESTED_PATH_WIN}${CLEAR_TEXT}): ${FAIL_TEXT}FAIL${CLEAR_TEXT}"
+    fi
+
+    if grep -q "registered \[    drive\] device #1:  home" "$DIAG_LOG"; then
+        echo -e "RDP drive registration: ${DONE_TEXT}PASS${CLEAR_TEXT}"
+    else
+        echo -e "RDP drive registration: ${FAIL_TEXT}FAIL${CLEAR_TEXT}"
+    fi
+
+    if grep -q "ERRINFO_LOGOFF_BY_USER" "$DIAG_LOG"; then
+        echo -e "RemoteApp command session: ${DONE_TEXT}COMPLETED${CLEAR_TEXT}"
+    else
+        echo -e "RemoteApp command session: ${WARNING_TEXT}INCOMPLETE${CLEAR_TEXT}"
+    fi
+    echo "--------------------------------------------------------------------------------"
+
+    if [ -f "$DIAG_ROOT_PATH" ] && [ -f "$DIAG_NESTED_PATH" ]; then
+        echo -e "${SUCCESS_TEXT}DIAGNOSTIC RESULT: PASS${CLEAR_TEXT}"
+        rm -f "$DIAG_ROOT_PATH" "$DIAG_NESTED_PATH"
+        return 0
+    fi
+
+    echo -e "${ERROR_TEXT}DIAGNOSTIC RESULT: FAIL${CLEAR_TEXT}"
+    echo "Likely cause: RemoteApp session could not write back to redirected drive (\\tsclient)."
+    echo "Note: Full desktop RDP sessions can still work even when this RemoteApp probe fails."
+    echo "Suggested checks on Windows:"
+    echo "  - Ensure drive redirection is allowed in RDP host policy/settings."
+    echo "  - In cmd.exe on Windows, test: dir \\tsclient\\home"
+    echo "  - In cmd.exe on Windows, test: copy /Y NUL \\tsclient\\home\\winapps_manual_probe"
+
+    return "$EC_APPQUERY_FAIL"
+}
+
+# Name: 'waStartRDPSession'
+# Role: Starts an interactive full Windows RDP desktop session.
+function waStartRDPSession() {
+    echo -e "${BOLD_TEXT}Starting Interactive Windows RDP Session${CLEAR_TEXT}"
+    local RDP_EXIT_CODE=0
+
+    waLoadConfig
+    waCheckInstallDependencies
+    waFixScale
+
+    if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
+        RDP_IP="$DOCKER_IP"
+    fi
+
+    if [ "$WAFLAVOR" = "podman" ]; then
+        FREERDP_COMMAND="podman unshare --rootless-netns ${FREERDP_COMMAND}"
+    fi
+
+    if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
+        waCheckContainerRunning
+    elif [ "$WAFLAVOR" = "libvirt" ]; then
+        waCheckGroupMembership
+        waCheckVMRunning
+    elif [ "$WAFLAVOR" = "manual" ]; then
+        :
+    else
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}INVALID WINAPPS BACKEND.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}An invalid WinApps backend '${WAFLAVOR}' was specified.${CLEAR_TEXT}"
+        return "$EC_INVALID_FLAVOR"
+    fi
+
+    waCheckPortOpen
+
+    echo "--------------------------------------------------------------------------------"
+    echo "Launching full desktop session."
+    echo "Tips:"
+    echo "  - To prepare WinApps on older Windows versions, sign in to Windows first."
+    echo "  - Then disconnect from inside Windows (Start Menu > Sign out, or run 'tsdiscon')."
+    echo "--------------------------------------------------------------------------------"
+
+    waBuildAuthPkgArgs "$FREERDP_COMMAND"
+    # shellcheck disable=SC2086
+    $FREERDP_COMMAND \
+        $RDP_FLAGS_SETUP_SAFE \
+        /cert:tofu \
+        "${WA_AUTH_PKG_ARGS[@]}" \
+        /d:"$RDP_DOMAIN" \
+        /u:"$RDP_USER" \
+        /p:"$RDP_PASS" \
+        /scale:"$RDP_SCALE" \
+        +auto-reconnect \
+        +home-drive \
+        /v:"$RDP_IP"
+
+    RDP_EXIT_CODE=$?
+
+    # FreeRDP commonly returns 12 when the session is intentionally disconnected (e.g., via tsdiscon).
+    if [ "$RDP_EXIT_CODE" -ne 0 ] && [ "$RDP_EXIT_CODE" -ne 12 ]; then
+        return "$RDP_EXIT_CODE"
+    fi
+
+    echo -e "${DONE_TEXT}RDP session exited.${CLEAR_TEXT}"
+    return 0
 }
 
 # Name: 'waFindInstalled'
@@ -1191,22 +1599,57 @@ function waFindInstalled() {
     echo -n "Checking for installed Windows applications... "
 
     # Declare variables.
-    local FREERDP_LOG=""  # Stores the path of the FreeRDP log file.
-    local FREERDP_PROC="" # Stores the FreeRDP process ID.
-    local ELAPSED_TIME="" # Stores the time counter.
+    local FREERDP_LOG=""   # Stores the path of the FreeRDP log file.
+    local FREERDP_PROC=""  # Stores the FreeRDP process ID.
+    local ELAPSED_TIME=""  # Stores the time counter.
+    local WARMUP_LOG=""    # Stores the path of a temporary FreeRDP warm-up log file.
+    local STAGE_BATCH_PATH="" # Stores the UNIX path of a root-level staged batch script.
+    local STAGE_PS_PATH="" # Stores the UNIX path of a root-level staged PowerShell script.
+    local STAGE_INST_PATH="" # Stores the UNIX path of a root-level staged installed file.
+    local STAGE_DET_PATH=""  # Stores the UNIX path of a root-level staged detected file.
+    local MANUAL_SCAN_BATCH_PATH="" # Stores the UNIX path of a full-session manual scan batch script.
+    local STAGE_BATCH_PATH_WIN='\\tsclient\home\winapps_installed.bat' # WINDOWS path of staged batch script.
+    local STAGE_PS_PATH_WIN='\\tsclient\home\winapps_extractprograms.ps1' # WINDOWS path of staged PowerShell script.
+    local STAGE_INST_PATH_WIN='\\tsclient\home\winapps_installed' # WINDOWS path of staged installed file.
+    local STAGE_DET_PATH_WIN='\\tsclient\home\winapps_detected' # WINDOWS path of staged detected file.
+    local MANUAL_SCAN_BATCH_PATH_WIN='\\tsclient\home\winapps_fullsession_scan.bat' # WINDOWS path of full-session manual scan batch.
 
     # Log file path.
     FREERDP_LOG="${USER_APPDATA_PATH}/FreeRDP_Scan_$(date +'%Y%m%d_%H%M_%N').log"
+    WARMUP_LOG="${USER_APPDATA_PATH}/FreeRDP_ScanWarmup_$(date +'%Y%m%d_%H%M_%N').log"
+    STAGE_BATCH_PATH="${HOME}/winapps_installed.bat"
+    STAGE_PS_PATH="${HOME}/winapps_extractprograms.ps1"
+    STAGE_INST_PATH="${HOME}/winapps_installed"
+    STAGE_DET_PATH="${HOME}/winapps_detected"
+    MANUAL_SCAN_BATCH_PATH="${HOME}/winapps_fullsession_scan.bat"
+
+    # Import staged scan results from a prior full desktop RDP session if available.
+    if [ -f "$STAGE_INST_PATH" ] && [ -f "$STAGE_DET_PATH" ]; then
+        mv -f "$STAGE_INST_PATH" "$INST_FILE_PATH"
+        mv -f "$STAGE_DET_PATH" "$DETECTED_FILE_PATH"
+        echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+        return 0
+    fi
 
     # Make the output directory if required.
     mkdir -p "$USER_APPDATA_PATH"
 
     # Remove temporary files from previous WinApps installations.
-    rm -f "$BATCH_SCRIPT_PATH" "$TMP_INST_FILE_PATH" "$INST_FILE_PATH" "$PS_SCRIPT_HOME_PATH" "$DETECTED_FILE_PATH"
+    rm -f "$BATCH_SCRIPT_PATH" "$TMP_INST_FILE_PATH" "$INST_FILE_PATH" "$PS_SCRIPT_HOME_PATH" "$DETECTED_FILE_PATH" "$STAGE_BATCH_PATH" "$STAGE_PS_PATH" "$STAGE_INST_PATH" "$STAGE_DET_PATH"
 
     # Copy PowerShell script to a directory within the user's home folder.
     # This will enable the PowerShell script to be accessed and executed by Windows.
     cp "$PS_SCRIPT_PATH" "$PS_SCRIPT_HOME_PATH"
+    # Also stage a root-level copy to avoid nested redirected-path issues on older Windows versions.
+    cp "$PS_SCRIPT_PATH" "$STAGE_PS_PATH"
+
+    # Build results in local Windows temp files first.
+    # This is more reliable on older Windows versions where repeated UNC writes can be flaky.
+    echo "SET \"WA_TMP_INST=%TEMP%\\winapps-installed.tmp\"" >>"$BATCH_SCRIPT_PATH"
+    echo "SET \"WA_TMP_DET=%TEMP%\\winapps-detected.tmp\"" >>"$BATCH_SCRIPT_PATH"
+    echo "SET \"WA_TMP_PS=%TEMP%\\winapps-ExtractPrograms.ps1\"" >>"$BATCH_SCRIPT_PATH"
+    echo "DEL /F /Q \"%WA_TMP_INST%\" \"%WA_TMP_DET%\" \"%WA_TMP_PS%\" >NUL 2>&1" >>"$BATCH_SCRIPT_PATH"
+    echo "COPY /Y NUL \"%WA_TMP_INST%\" >NUL" >>"$BATCH_SCRIPT_PATH"
 
     # Enumerate over each officially supported application.
     for APPLICATION in ./apps/*; do
@@ -1228,33 +1671,69 @@ function waFindInstalled() {
         source "./apps/${APPLICATION}/info"
 
         # Append commands to batch file.
-        echo "IF EXIST \"${WIN_EXECUTABLE}\" ECHO ${APPLICATION}^|^|^|${WIN_EXECUTABLE} >> ${TMP_INST_FILE_PATH_WIN}" >>"$BATCH_SCRIPT_PATH"
+        echo "IF EXIST \"${WIN_EXECUTABLE}\" ECHO ${APPLICATION}^|^|^|${WIN_EXECUTABLE} >> \"%WA_TMP_INST%\"" >>"$BATCH_SCRIPT_PATH"
     done
 
-    # Append a command to the batch script to run the PowerShell script and store its output in the 'detected' file.
+    # Run the PowerShell scanner locally, then copy all outputs back to Linux with retries.
     # shellcheck disable=SC2129 # Silence warning regarding repeated redirects.
-    echo "powershell.exe -ExecutionPolicy Bypass -File ${PS_SCRIPT_HOME_PATH_WIN} > ${DETECTED_FILE_PATH_WIN}" >>"$BATCH_SCRIPT_PATH"
-
-    # Append a command to the batch script to rename the temporary file containing the names of all detected officially supported applications.
-    echo "RENAME ${TMP_INST_FILE_PATH_WIN} installed" >>"$BATCH_SCRIPT_PATH"
+    echo "COPY /Y ${STAGE_PS_PATH_WIN} \"%WA_TMP_PS%\" >NUL" >>"$BATCH_SCRIPT_PATH"
+    echo "powershell.exe -ExecutionPolicy Bypass -File \"%WA_TMP_PS%\" > \"%WA_TMP_DET%\"" >>"$BATCH_SCRIPT_PATH"
+    echo "SET /A WA_TRIES=0" >>"$BATCH_SCRIPT_PATH"
+    echo ":WA_COPY_BACK" >>"$BATCH_SCRIPT_PATH"
+    echo "COPY /Y \"%WA_TMP_INST%\" ${STAGE_INST_PATH_WIN} >NUL" >>"$BATCH_SCRIPT_PATH"
+    echo "COPY /Y \"%WA_TMP_DET%\" ${STAGE_DET_PATH_WIN} >NUL" >>"$BATCH_SCRIPT_PATH"
+    echo "IF EXIST ${STAGE_INST_PATH_WIN} IF EXIST ${STAGE_DET_PATH_WIN} GOTO WA_DONE" >>"$BATCH_SCRIPT_PATH"
+    echo "SET /A WA_TRIES+=1" >>"$BATCH_SCRIPT_PATH"
+    echo "IF %WA_TRIES% GEQ 15 GOTO WA_DONE" >>"$BATCH_SCRIPT_PATH"
+    echo "PING -n 2 127.0.0.1 >NUL" >>"$BATCH_SCRIPT_PATH"
+    echo "GOTO WA_COPY_BACK" >>"$BATCH_SCRIPT_PATH"
+    echo ":WA_DONE" >>"$BATCH_SCRIPT_PATH"
 
     # Append a command to the batch script to terminate the remote desktop session once all previous commands are complete.
     echo "tsdiscon" >>"$BATCH_SCRIPT_PATH"
 
-    # Silently execute the batch script within Windows in the background (Log Output To File)
-    # Note: The following final line is expected within the log, indicating successful execution of the 'tsdiscon' command and termination of the RDP session.
-    # [INFO][com.freerdp.core] - [rdp_print_errinfo]: ERRINFO_LOGOFF_BY_USER (0x0000000C):The disconnection was initiated by the user logging off their session on the server.
+    # Stage the generated batch at a root-level redirected path.
+    cp "$BATCH_SCRIPT_PATH" "$STAGE_BATCH_PATH"
+    cp "$BATCH_SCRIPT_PATH" "$MANUAL_SCAN_BATCH_PATH"
+
+    # Warm up a RemoteApp session (without UNC access) before the actual scan.
+    # This improves reliability of redirected drive access on the subsequent reconnect session.
+    waBuildAuthPkgArgs "$FREERDP_COMMAND"
+    waBuildRemoteAppArgs "$FREERDP_COMMAND" "C:\Windows\System32\cmd.exe" "/C PING -n 6 127.0.0.1 >NUL && tsdiscon"
     # shellcheck disable=SC2140,SC2027,SC2086 # Disable warnings regarding unquoted strings.
     $FREERDP_COMMAND \
-        $RDP_FLAGS_NON_WINDOWS \
+        $RDP_FLAGS_SETUP_SAFE \
         /cert:tofu \
+        "${WA_AUTH_PKG_ARGS[@]}" \
         /d:"$RDP_DOMAIN" \
         /u:"$RDP_USER" \
         /p:"$RDP_PASS" \
         /scale:"$RDP_SCALE" \
         +auto-reconnect \
         +home-drive \
-        /app:program:"C:\Windows\System32\cmd.exe",cmd:"/C "$BATCH_SCRIPT_PATH_WIN"" \
+        "${WA_REMOTEAPP_ARGS[@]}" \
+        /v:"$RDP_IP" &>"$WARMUP_LOG" || true
+
+    # Give Windows a brief moment to settle before starting the scan command.
+    sleep 2
+
+    # Silently execute the batch script within Windows in the background (Log Output To File)
+    # Note: The following final line is expected within the log, indicating successful execution of the 'tsdiscon' command and termination of the RDP session.
+    # [INFO][com.freerdp.core] - [rdp_print_errinfo]: ERRINFO_LOGOFF_BY_USER (0x0000000C):The disconnection was initiated by the user logging off their session on the server.
+    # The batch script is copied to a local Windows %TEMP% path before execution to avoid restrictions on running scripts from UNC network paths.
+    waBuildRemoteAppArgs "$FREERDP_COMMAND" "C:\Windows\System32\cmd.exe" "/C copy $STAGE_BATCH_PATH_WIN %TEMP%\\wa_scan.bat && call %TEMP%\\wa_scan.bat"
+    # shellcheck disable=SC2140,SC2027,SC2086 # Disable warnings regarding unquoted strings.
+    $FREERDP_COMMAND \
+        $RDP_FLAGS_SETUP_SAFE \
+        /cert:tofu \
+        "${WA_AUTH_PKG_ARGS[@]}" \
+        /d:"$RDP_DOMAIN" \
+        /u:"$RDP_USER" \
+        /p:"$RDP_PASS" \
+        /scale:"$RDP_SCALE" \
+        +auto-reconnect \
+        +home-drive \
+        "${WA_REMOTEAPP_ARGS[@]}" \
         /v:"$RDP_IP" &>"$FREERDP_LOG" &
 
     # Store the FreeRDP process ID.
@@ -1281,6 +1760,14 @@ function waFindInstalled() {
         kill -9 "$FREERDP_PROC" &>/dev/null
     fi
 
+    # If stage files exist at root-level tsclient paths, promote them to expected WinApps paths.
+    if [ -f "$STAGE_INST_PATH" ]; then
+        mv -f "$STAGE_INST_PATH" "$INST_FILE_PATH"
+    fi
+    if [ -f "$STAGE_DET_PATH" ]; then
+        mv -f "$STAGE_DET_PATH" "$DETECTED_FILE_PATH"
+    fi
+
     # Check if test file does not exist.
     if ! [ -f "$INST_FILE_PATH" ]; then
         # Complete the previous line.
@@ -1296,6 +1783,9 @@ function waFindInstalled() {
         echo "--------------------------------------------------------------------------------"
         echo -e "Please view the log at ${COMMAND_TEXT}${FREERDP_LOG}${CLEAR_TEXT}."
         echo -e "You can try increasing the ${COMMAND_TEXT}APP_SCAN_TIMEOUT${CLEAR_TEXT} in ${COMMAND_TEXT}${CONFIG_PATH}${CLEAR_TEXT}."
+        echo -e "If full desktop RDP works on your Windows version, run this inside a desktop session:"
+        echo -e "  ${COMMAND_TEXT}${MANUAL_SCAN_BATCH_PATH_WIN}${CLEAR_TEXT}"
+        echo -e "Then rerun setup; staged results at ${COMMAND_TEXT}${STAGE_INST_PATH_WIN}${CLEAR_TEXT} and ${COMMAND_TEXT}${STAGE_DET_PATH_WIN}${CLEAR_TEXT} will be imported automatically."
         echo "--------------------------------------------------------------------------------"
 
         # Terminate the script.
@@ -1688,11 +2178,6 @@ function waInstall() {
     # Update $RDP_SCALE.
     waFixScale
 
-    # Append additional FreeRDP flags if required.
-    if [[ -n $RDP_FLAGS ]]; then
-        FREERDP_COMMAND="${FREERDP_COMMAND} ${RDP_FLAGS}"
-    fi
-
     # If using 'docker' or 'podman', set RDP_IP to localhost.
     if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
         RDP_IP="$DOCKER_IP"
@@ -1885,11 +2370,6 @@ function waAddApps() {
     # Update $RDP_SCALE.
     waFixScale
 
-    # Append additional FreeRDP flags if required.
-    if [[ -n $RDP_FLAGS ]]; then
-        FREERDP_COMMAND="${FREERDP_COMMAND} ${RDP_FLAGS}"
-    fi
-
     # If using 'docker' or 'podman', set RDP_IP to localhost.
     if [ "$WAFLAVOR" = "docker" ] || [ "$WAFLAVOR" = "podman" ]; then
         RDP_IP="$DOCKER_IP"
@@ -1969,8 +2449,22 @@ waCheckInput "$@"
 # Configure paths and permissions.
 waConfigurePathsAndPermissions
 
+# Run diagnostic mode and exit.
+if [ "$OPT_DIAG" -eq 1 ]; then
+    waDiagnoseRDPDrive
+    exit $?
+fi
+
+# Run interactive RDP starter mode and exit.
+if [ "$OPT_START_RDP" -eq 1 ]; then
+    waStartRDPSession
+    exit $?
+fi
+
 # Get the source code
-waGetSourceCode
+if [ "$OPT_UNINSTALL" -eq 0 ]; then
+    waGetSourceCode
+fi
 # Install or uninstall WinApps.
 if [ "$OPT_UNINSTALL" -eq 1 ]; then
     waUninstall

@@ -58,6 +58,8 @@ HIDEF="on"
 RDP_FLATPAK=0
 RDP_FLAGS_WINDOWS=""
 RDP_FLAGS_NON_WINDOWS=""
+FREERDP_COMMAND_REMOTEAPP=""
+FREERDP_REMOTEAPP_V3=1
 
 # OTHER
 FREERDP_PID=-1
@@ -222,8 +224,8 @@ function waThrowExit() {
         notify-send --expire-time=8000 --icon="dialog-error" --app-name="WinApps" --urgency="low" "WinApps" "The WinApps configuration file is missing.\nPlease create a WinApps configuration file at '${CONFIG_PATH}'."
         ;;
     "$EC_MISSING_FREERDP")
-        dprint "ERROR: FREERDP VERSION 3 IS NOT INSTALLED. EXITING."
-        notify-send --expire-time=8000 --icon="dialog-error" --app-name="WinApps" --urgency="low" "WinApps" "FreeRDP version 3 is not installed."
+        dprint "ERROR: FREERDP IS NOT INSTALLED. EXITING."
+        notify-send --expire-time=8000 --icon="dialog-error" --app-name="WinApps" --urgency="low" "WinApps" "FreeRDP is not installed."
         ;;
     "$EC_NOT_IN_GROUP")
         dprint "ERROR: USER NOT PART OF REQUIRED GROUPS. EXITING."
@@ -407,52 +409,166 @@ function waLastRun() {
 function waGetFreeRDPCommand() {
     # Declare variables.
     local FREERDP_MAJOR_VERSION="" # Stores the major version of the installed copy of FreeRDP.
+    local FREERDP_V2_COMMAND=""
+    local FREERDP_V3_COMMAND=""
 
-    # Attempt to set a FreeRDP command if the command variable is empty.
+    # Respect explicit configuration first.
+    if [ -n "$FREERDP_COMMAND" ]; then
+        if command -v "$FREERDP_COMMAND" &>/dev/null || [ "$FREERDP_COMMAND" = "flatpak run --command=xfreerdp com.freerdp.FreeRDP" ]; then
+            dprint "Using configured FreeRDP command '${FREERDP_COMMAND}'."
+            FREERDP_COMMAND_REMOTEAPP="$FREERDP_COMMAND"
+
+            if (( $(waGetFreeRDPMajorVersion "$FREERDP_COMMAND_REMOTEAPP") >= 3 )); then
+                FREERDP_REMOTEAPP_V3=1
+            else
+                FREERDP_REMOTEAPP_V3=0
+            fi
+
+            # Append additional flags or parameters to FreeRDP.
+            # These additional flags are loaded prior in 'waLoadConfig'.
+            [[ -n $RDP_FLAGS ]] && FREERDP_COMMAND="${FREERDP_COMMAND} ${RDP_FLAGS}"
+            [[ -n $RDP_FLAGS ]] && FREERDP_COMMAND_REMOTEAPP="${FREERDP_COMMAND_REMOTEAPP} ${RDP_FLAGS}"
+            return
+        fi
+        waThrowExit "$EC_MISSING_FREERDP"
+    fi
+
+    # Autodetect FreeRDP commands if not explicitly configured.
     if [ -z "$FREERDP_COMMAND" ]; then
         # Check for 'xfreerdp'.
         if command -v xfreerdp &>/dev/null; then
-            # Check FreeRDP major version is 3 or greater.
+            # Determine major version and classify as v2/v3 candidate.
             FREERDP_MAJOR_VERSION=$(xfreerdp --version | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
-            if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
-                FREERDP_COMMAND="xfreerdp"
-            fi
-        fi
-
-        # Check for 'xfreerdp3' command as a fallback option.
-        if [ -z "$FREERDP_COMMAND" ]; then
-            if command -v xfreerdp3 &>/dev/null; then
-                # Check FreeRDP major version is 3 or greater.
-                FREERDP_MAJOR_VERSION=$(xfreerdp3 --version | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
-                if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
-                    FREERDP_COMMAND="xfreerdp3"
+            if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]]; then
+                if ((FREERDP_MAJOR_VERSION >= 3)); then
+                    FREERDP_V3_COMMAND="xfreerdp"
+                elif ((FREERDP_MAJOR_VERSION >= 2)); then
+                    FREERDP_V2_COMMAND="xfreerdp"
                 fi
             fi
         fi
 
-        # Check for FreeRDP Flatpak (fallback option).
-        if [ -z "$FREERDP_COMMAND" ]; then
+        # Check for 'xfreerdp3' command as a fallback option for v3.
+        if [ -z "$FREERDP_V3_COMMAND" ]; then
+            if command -v xfreerdp3 &>/dev/null; then
+                # Check FreeRDP major version is 3 or greater.
+                FREERDP_MAJOR_VERSION=$(xfreerdp3 --version | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
+                if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
+                    FREERDP_V3_COMMAND="xfreerdp3"
+                fi
+            fi
+        fi
+
+        # Check for FreeRDP Flatpak (fallback option for v3).
+        if [ -z "$FREERDP_V3_COMMAND" ]; then
             if command -v flatpak &>/dev/null; then
                 if flatpak list --columns=application | grep -q "^com.freerdp.FreeRDP$"; then
                     # Check FreeRDP major version is 3 or greater.
                     FREERDP_MAJOR_VERSION=$(flatpak list --columns=application,version | grep "^com.freerdp.FreeRDP" | awk '{print $2}' | cut -d'.' -f1)
                     if [[ $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]] && ((FREERDP_MAJOR_VERSION >= 3)); then
-                        FREERDP_COMMAND="flatpak run --command=xfreerdp com.freerdp.FreeRDP"
-                        RDP_FLATPAK=1
+                        FREERDP_V3_COMMAND="flatpak run --command=xfreerdp com.freerdp.FreeRDP"
                     fi
                 fi
             fi
+        fi
+
+        # Desktop session prefers v3 when available.
+        if [ -n "$FREERDP_V3_COMMAND" ]; then
+            FREERDP_COMMAND="$FREERDP_V3_COMMAND"
+            if [ "$FREERDP_COMMAND" = "flatpak run --command=xfreerdp com.freerdp.FreeRDP" ]; then
+                RDP_FLATPAK=1
+            fi
+        elif [ -n "$FREERDP_V2_COMMAND" ]; then
+            FREERDP_COMMAND="$FREERDP_V2_COMMAND"
+            RDP_FLATPAK=0
+        fi
+
+        # RemoteApp launches prefer v2 when available (better compatibility on older Windows versions).
+        if [ -n "$FREERDP_V2_COMMAND" ]; then
+            FREERDP_COMMAND_REMOTEAPP="$FREERDP_V2_COMMAND"
+        elif [ -n "$FREERDP_V3_COMMAND" ]; then
+            FREERDP_COMMAND_REMOTEAPP="$FREERDP_V3_COMMAND"
         fi
     fi
 
     if command -v "$FREERDP_COMMAND" &>/dev/null || [ "$FREERDP_COMMAND" = "flatpak run --command=xfreerdp com.freerdp.FreeRDP" ]; then
         dprint "Using FreeRDP command '${FREERDP_COMMAND}'."
 
+        if [ -z "$FREERDP_COMMAND_REMOTEAPP" ]; then
+            FREERDP_COMMAND_REMOTEAPP="$FREERDP_COMMAND"
+        fi
+        dprint "Using RemoteApp FreeRDP command '${FREERDP_COMMAND_REMOTEAPP}'."
+
+        if (( $(waGetFreeRDPMajorVersion "$FREERDP_COMMAND_REMOTEAPP") >= 3 )); then
+            FREERDP_REMOTEAPP_V3=1
+        else
+            FREERDP_REMOTEAPP_V3=0
+        fi
+
         # Append additional flags or parameters to FreeRDP.
         # These additional flags are loaded prior in 'waLoadConfig'.
         [[ -n $RDP_FLAGS ]] && FREERDP_COMMAND="${FREERDP_COMMAND} ${RDP_FLAGS}"
+        [[ -n $RDP_FLAGS ]] && FREERDP_COMMAND_REMOTEAPP="${FREERDP_COMMAND_REMOTEAPP} ${RDP_FLAGS}"
     else
         waThrowExit "$EC_MISSING_FREERDP"
+    fi
+}
+
+# Name: 'waGetFreeRDPMajorVersion'
+# Role: Determine the FreeRDP major version for a command string.
+function waGetFreeRDPMajorVersion() {
+    local FREERDP_CMD="$1"
+    local FREERDP_MAJOR_VERSION="0"
+
+    if [ "$FREERDP_CMD" = "flatpak run --command=xfreerdp com.freerdp.FreeRDP" ]; then
+        if command -v flatpak &>/dev/null; then
+            FREERDP_MAJOR_VERSION=$(flatpak list --columns=application,version | grep "^com.freerdp.FreeRDP" | awk '{print $2}' | cut -d'.' -f1)
+        fi
+    elif command -v "$FREERDP_CMD" &>/dev/null; then
+        FREERDP_MAJOR_VERSION=$($FREERDP_CMD --version 2>/dev/null | head -n 1 | grep -o -m 1 '\b[0-9]\S*' | head -n 1 | cut -d'.' -f1)
+    fi
+
+    if [[ ! $FREERDP_MAJOR_VERSION =~ ^[0-9]+$ ]]; then
+        FREERDP_MAJOR_VERSION="0"
+    fi
+
+    echo "$FREERDP_MAJOR_VERSION"
+}
+
+# Name: 'waBuildRemoteAppArgs'
+# Role: Build RemoteApp arguments compatible with FreeRDP v2 and v3 syntaxes.
+function waBuildRemoteAppArgs() {
+    local APP_PROGRAM="$1"
+    local APP_CMD="$2"
+    local APP_ICON="$3"
+    local APP_NAME="$4"
+
+    WA_REMOTEAPP_ARGS=()
+
+    if [ "$FREERDP_REMOTEAPP_V3" -eq 1 ]; then
+        local APP_ARG="/app:program:${APP_PROGRAM},hidef:${HIDEF}"
+        if [ -n "$APP_ICON" ]; then
+            APP_ARG+=" ,icon:${APP_ICON}"
+        fi
+        if [ -n "$APP_NAME" ]; then
+            APP_ARG+=" ,name:${APP_NAME}"
+        fi
+        if [ -n "$APP_CMD" ]; then
+            APP_ARG+=" ,cmd:${APP_CMD}"
+        fi
+        APP_ARG=${APP_ARG// ,/,}
+        WA_REMOTEAPP_ARGS=("$APP_ARG")
+    else
+        WA_REMOTEAPP_ARGS=("/app:${APP_PROGRAM}")
+        if [ -n "$APP_ICON" ]; then
+            WA_REMOTEAPP_ARGS+=("/app-icon:${APP_ICON}")
+        fi
+        if [ -n "$APP_NAME" ]; then
+            WA_REMOTEAPP_ARGS+=("/app-name:${APP_NAME}")
+        fi
+        if [ -n "$APP_CMD" ]; then
+            WA_REMOTEAPP_ARGS+=("/app-cmd:${APP_CMD}")
+        fi
     fi
 }
 
@@ -753,6 +869,7 @@ function waRunCommand() {
     # Declare variables.
     local ICON=""
     local FILE_PATH=""
+    local ACTIVE_FREERDP_COMMAND="$FREERDP_COMMAND"
 
     # Run option.
     if [ "$1" = "windows" ]; then
@@ -777,17 +894,19 @@ function waRunCommand() {
         # Capture the process ID.
         FREERDP_PID=$!
     elif [ "$1" = "manual" ]; then
+        ACTIVE_FREERDP_COMMAND="$FREERDP_COMMAND_REMOTEAPP"
         # Open specified application.
         dprint "MANUAL: ${2}"
+        waBuildRemoteAppArgs "$2" "" "" ""
         # shellcheck disable=SC2086 #Disable warning for globbing and word splitting
-        $FREERDP_COMMAND \
+        $ACTIVE_FREERDP_COMMAND \
             $RDP_FLAGS_NON_WINDOWS \
             /d:"$RDP_DOMAIN" \
             /u:"$RDP_USER" \
             ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
             /scale:"$RDP_SCALE" \
             +auto-reconnect \
-            /app:program:"$2",hidef:"$HIDEF" \
+            "${WA_REMOTEAPP_ARGS[@]}" \
             /v:"$RDP_IP" &>/dev/null &
 
         # Capture the process ID.
@@ -810,11 +929,37 @@ function waRunCommand() {
             waThrowExit "$EC_UNSUPPORTED_APP"
         fi
 
+        # Some launchers/terminals can pass desktop placeholders literally.
+        # Treat these as "no file argument" rather than an actual path.
+        if [[ "$2" == "%F" || "$2" == "%f" || "$2" == "%U" || "$2" == "%u" ]]; then
+            set -- "$1"
+        fi
+
         # Check if a file path was specified, and pass this to the application.
         if [ -z "$2" ]; then
+            ACTIVE_FREERDP_COMMAND="$FREERDP_COMMAND_REMOTEAPP"
+            # Explorer can fail to present a visible RemoteApp window on older Windows when launched directly.
+            # Start it via cmd.exe to improve compatibility.
+            if [ "$1" = "explorer" ]; then
+                waBuildRemoteAppArgs "C:\Windows\System32\cmd.exe" "/C start \"\" explorer.exe" "$ICON" "$FULL_NAME"
+                # shellcheck disable=SC2086
+                $ACTIVE_FREERDP_COMMAND \
+                   $RDP_FLAGS_NON_WINDOWS \
+                    /d:"$RDP_DOMAIN" \
+                    /u:"$RDP_USER" \
+                    ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
+                    /scale:"$RDP_SCALE" \
+                    +auto-reconnect \
+                    /wm-class:"$FULL_NAME" \
+                    "${WA_REMOTEAPP_ARGS[@]}" \
+                    /v:"$RDP_IP" &>/dev/null &
+
+                FREERDP_PID=$!
+            else
             # No file path specified.
+            waBuildRemoteAppArgs "$WIN_EXECUTABLE" "" "$ICON" "$FULL_NAME"
             # shellcheck disable=SC2086 #Disable warning for globbing and word splitting
-            $FREERDP_COMMAND \
+                $ACTIVE_FREERDP_COMMAND \
                $RDP_FLAGS_NON_WINDOWS \
                 /d:"$RDP_DOMAIN" \
                 /u:"$RDP_USER" \
@@ -822,11 +967,12 @@ function waRunCommand() {
                 /scale:"$RDP_SCALE" \
                 +auto-reconnect \
                 /wm-class:"$FULL_NAME" \
-                /app:program:"$WIN_EXECUTABLE",hidef:"$HIDEF",icon:"$ICON",name:"$FULL_NAME" \
+                "${WA_REMOTEAPP_ARGS[@]}" \
                 /v:"$RDP_IP" &>/dev/null &
 
             # Capture the process ID.
             FREERDP_PID=$!
+            fi
         else
             # Convert path from UNIX to Windows style.
             FILE_PATH=$(echo "$2" | sed \
@@ -835,9 +981,29 @@ function waRunCommand() {
                 -e 's|/|\\|g')
             dprint "UNIX_FILE_PATH: ${2}"
             dprint "WINDOWS_FILE_PATH: ${FILE_PATH}"
+            ACTIVE_FREERDP_COMMAND="$FREERDP_COMMAND_REMOTEAPP"
+
+            if [ "$1" = "explorer" ]; then
+                waBuildRemoteAppArgs "C:\Windows\System32\cmd.exe" "/C start \"\" explorer.exe \"$FILE_PATH\"" "$ICON" "$FULL_NAME"
+                # shellcheck disable=SC2086
+                $ACTIVE_FREERDP_COMMAND \
+                   $RDP_FLAGS_NON_WINDOWS \
+                    /d:"$RDP_DOMAIN" \
+                    /u:"$RDP_USER" \
+                    ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
+                    /scale:"$RDP_SCALE" \
+                    +auto-reconnect \
+                    /drive:media,"$REMOVABLE_MEDIA" \
+                    /wm-class:"$FULL_NAME" \
+                    "${WA_REMOTEAPP_ARGS[@]}" \
+                    /v:"$RDP_IP" &>/dev/null &
+
+                FREERDP_PID=$!
+            else
+            waBuildRemoteAppArgs "$WIN_EXECUTABLE" "\"$FILE_PATH\"" "$ICON" "$FULL_NAME"
 
             # shellcheck disable=SC2086 #Disable warning for globbing and word splitting
-            $FREERDP_COMMAND \
+                $ACTIVE_FREERDP_COMMAND \
                $RDP_FLAGS_NON_WINDOWS \
                 /d:"$RDP_DOMAIN" \
                 /u:"$RDP_USER" \
@@ -846,11 +1012,12 @@ function waRunCommand() {
                 +auto-reconnect \
                 /drive:media,"$REMOVABLE_MEDIA" \
                 /wm-class:"$FULL_NAME" \
-                /app:program:"$WIN_EXECUTABLE",hidef:"$HIDEF",icon:"$ICON",name:"$FULL_NAME",cmd:\""$FILE_PATH"\" \
+                "${WA_REMOTEAPP_ARGS[@]}" \
                 /v:"$RDP_IP" &>/dev/null &
 
             # Capture the process ID.
             FREERDP_PID=$!
+            fi
         fi
     fi
 
