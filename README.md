@@ -367,7 +367,7 @@ Install the required dependencies.
       ```
 
 > [!NOTE]
-> WinApps requires `FreeRDP` version 3 or later. If not available for your distribution through your package manager, you can install the [Flatpak](https://flathub.org/apps/com.freerdp.FreeRDP):
+> WinApps supports `FreeRDP` version 2 or later (including `xfreerdp` and `xfreerdp3`). If not available for your distribution through your package manager, you can install the [Flatpak](https://flathub.org/apps/com.freerdp.FreeRDP):
 > ```bash
 > flatpak install flathub com.freerdp.FreeRDP
 > sudo flatpak override --filesystem=home com.freerdp.FreeRDP # To use `+home-drive`
@@ -509,7 +509,7 @@ AUTOPAUSE_TIME="300"
 # NOTES:
 # - WinApps will attempt to automatically detect the correct command to use for your system.
 # DEFAULT VALUE: '' (BLANK)
-# VALID VALUES: The command required to run FreeRDPv3 on your system (e.g., 'xfreerdp', 'xfreerdp3', etc.).
+# VALID VALUES: The command required to run FreeRDP on your system (e.g., 'xfreerdp', 'xfreerdp3', etc.).
 FREERDP_COMMAND=""
 
 # [TIMEOUTS]
@@ -576,10 +576,10 @@ HIDEF="on"
 1. Test establishing an RDP session by running the following command, replacing the `/u:`, `/p:`, and `/v:` values with the correct values specified in `~/.config/winapps/winapps.conf`.
 
     ```bash
-    xfreerdp3 /u:"MyWindowsUser" /p:"MyWindowsPassword" /v:127.0.0.1 /cert:tofu
+    xfreerdp /u:"MyWindowsUser" /p:"MyWindowsPassword" /v:127.0.0.1 /cert:tofu
 
     # Or, if you are using Podman
-    podman unshare --rootless-netns xfreerdp3 /u:"MyWindowsUser" /p:"MyWindowsPassword" /v:127.0.0.1 /cert:tofu
+    podman unshare --rootless-netns xfreerdp /u:"MyWindowsUser" /p:"MyWindowsPassword" /v:127.0.0.1 /cert:tofu
 
     # Or, if you installed FreeRDP using Flatpak
     flatpak run --command=xfreerdp com.freerdp.FreeRDP /u:"MyWindowsUser" /p:"MyWindowsPassword" /v:127.0.0.1 /cert:tofu
