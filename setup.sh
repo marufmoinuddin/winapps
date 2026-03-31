@@ -89,7 +89,6 @@ OPT_START_RDP=0 # Set to '1' if the user specifies '--start-rdp-session'.
 # WINAPPS CONFIGURATION FILE
 RDP_USER=""          # Imported variable.
 RDP_PASS=""          # Imported variable.
-RDP_ASKPASS=""       # Imported variable.
 RDP_DOMAIN=""        # Imported variable.
 RDP_IP=""            # Imported variable.
 VM_NAME="RDPWindows" # Name of the Windows VM (FOR 'libvirt' ONLY).
@@ -670,15 +669,6 @@ function waLoadConfig() {
             -e 's/[[:space:]]+/ /g' \
             -e 's/^[[:space:]]+//' \
             -e 's/[[:space:]]+$//')
-
-        # Send password on the command line if a command to retrieve the password from is not given.
-        # Otherwise, set FREERDP_ASKPASS so FreeRDP can read the password from command stdout.
-        RDP_PASSWORD_ARG="/p:$RDP_PASS"
-
-        if [[ ! -z "$RDP_ASKPASS" ]]; then
-            export FREERDP_ASKPASS="$RDP_ASKPASS"
-            unset RDP_PASSWORD_ARG
-        fi
     fi
 
     # Print feedback.
@@ -1468,7 +1458,7 @@ function waDiagnoseRDPDrive() {
         "${WA_AUTH_PKG_ARGS[@]}" \
         /d:"$RDP_DOMAIN" \
         /u:"$RDP_USER" \
-        ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
+        /p:"$RDP_PASS" \
         /scale:"$RDP_SCALE" \
         +auto-reconnect \
         +home-drive \
@@ -1618,6 +1608,8 @@ function waFindInstalled() {
     local STAGE_INST_PATH="" # Stores the UNIX path of a root-level staged installed file.
     local STAGE_DET_PATH=""  # Stores the UNIX path of a root-level staged detected file.
     local MANUAL_SCAN_BATCH_PATH="" # Stores the UNIX path of a full-session manual scan batch script.
+    local SUPPORTED_APPS_COUNT=0 # Stores count of detected officially supported apps.
+    local STAGE_SUPPORTED_APPS_COUNT=0 # Stores count from staged installed file.
     local STAGE_BATCH_PATH_WIN='\\tsclient\home\winapps_installed.bat' # WINDOWS path of staged batch script.
     local STAGE_PS_PATH_WIN='\\tsclient\home\winapps_extractprograms.ps1' # WINDOWS path of staged PowerShell script.
     local STAGE_INST_PATH_WIN='\\tsclient\home\winapps_installed' # WINDOWS path of staged installed file.
@@ -1635,10 +1627,18 @@ function waFindInstalled() {
 
     # Import staged scan results from a prior full desktop RDP session if available.
     if [ -f "$STAGE_INST_PATH" ] && [ -f "$STAGE_DET_PATH" ]; then
-        mv -f "$STAGE_INST_PATH" "$INST_FILE_PATH"
-        mv -f "$STAGE_DET_PATH" "$DETECTED_FILE_PATH"
-        echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
-        return 0
+        STAGE_SUPPORTED_APPS_COUNT=$(grep -c '|||' "$STAGE_INST_PATH" 2>/dev/null || true)
+
+        # Guard against stale or partial staged imports from previous runs.
+        if [ "$STAGE_SUPPORTED_APPS_COUNT" -ge 2 ]; then
+            mv -f "$STAGE_INST_PATH" "$INST_FILE_PATH"
+            mv -f "$STAGE_DET_PATH" "$DETECTED_FILE_PATH"
+            echo -e "${DONE_TEXT}Done!${CLEAR_TEXT}"
+            return 0
+        fi
+
+        echo -e "${WARNING_TEXT}[WARNING]${CLEAR_TEXT} Ignoring stale/partial staged scan result (${STAGE_SUPPORTED_APPS_COUNT} supported app(s)). Running a fresh scan..."
+        rm -f "$STAGE_INST_PATH" "$STAGE_DET_PATH"
     fi
 
     # Make the output directory if required.
@@ -1717,7 +1717,7 @@ function waFindInstalled() {
         "${WA_AUTH_PKG_ARGS[@]}" \
         /d:"$RDP_DOMAIN" \
         /u:"$RDP_USER" \
-        ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
+        /p:"$RDP_PASS" \
         /scale:"$RDP_SCALE" \
         +auto-reconnect \
         +home-drive \
@@ -1799,6 +1799,19 @@ function waFindInstalled() {
         echo "--------------------------------------------------------------------------------"
 
         # Terminate the script.
+        return "$EC_APPQUERY_FAIL"
+    fi
+
+    # Validate scan quality to avoid proceeding with intermittent partial results.
+    SUPPORTED_APPS_COUNT=$(grep -c '|||' "$INST_FILE_PATH" 2>/dev/null || true)
+    if [ "$SUPPORTED_APPS_COUNT" -lt 2 ]; then
+        echo -e "${FAIL_TEXT}Failed!${CLEAR_TEXT}\n"
+        echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}APPLICATION QUERY FAILURE.${CLEAR_TEXT}"
+        echo -e "${INFO_TEXT}The scan returned an incomplete supported-app list (${SUPPORTED_APPS_COUNT} app(s)).${CLEAR_TEXT}"
+        echo "--------------------------------------------------------------------------------"
+        echo -e "This is usually transient. Please rerun setup (no uninstall needed)."
+        echo -e "You can also run ${COMMAND_TEXT}--start-rdp-session${CLEAR_TEXT} once, sign out, and rerun setup."
+        echo "--------------------------------------------------------------------------------"
         return "$EC_APPQUERY_FAIL"
     fi
 
@@ -2302,6 +2315,11 @@ function waUninstall() {
     local WINAPPS_APP_BASH_SCRIPTS=() # Stores a list of bash script paths.
     local DESKTOP_FILE_NAME=""        # Stores the name of the '.desktop' file for the application.
     local BASH_SCRIPT_NAME=""         # Stores the name of the application.
+    local STAGE_BATCH_PATH="${HOME}/winapps_installed.bat"
+    local STAGE_PS_PATH="${HOME}/winapps_extractprograms.ps1"
+    local STAGE_INST_PATH="${HOME}/winapps_installed"
+    local STAGE_DET_PATH="${HOME}/winapps_detected"
+    local MANUAL_SCAN_BATCH_PATH="${HOME}/winapps_fullsession_scan.bat"
 
     # Remove the 'WinApps' bash scripts.
     $SUDO rm -f "${BIN_PATH}/winapps"
@@ -2309,6 +2327,9 @@ function waUninstall() {
 
     # Remove WinApps configuration data, temporary files and logs.
     rm -rf "$USER_APPDATA_PATH"
+
+    # Remove staged scan artifacts in home directory to avoid stale imports on reinstall.
+    rm -f "$STAGE_BATCH_PATH" "$STAGE_PS_PATH" "$STAGE_INST_PATH" "$STAGE_DET_PATH" "$MANUAL_SCAN_BATCH_PATH"
 
     # Remove application icons and shortcuts.
     $SUDO rm -rf "$APPDATA_PATH"

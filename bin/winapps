@@ -572,6 +572,48 @@ function waBuildRemoteAppArgs() {
     fi
 }
 
+# Name: 'waNormalizeFileArg'
+# Role: Normalize launcher-provided file arguments (file:// URIs and percent-encoding).
+function waNormalizeFileArg() {
+    local RAW_FILE_ARG="$1"
+
+    if [[ "$RAW_FILE_ARG" == file://* ]]; then
+        RAW_FILE_ARG="${RAW_FILE_ARG#file://}"
+        RAW_FILE_ARG="${RAW_FILE_ARG#localhost}"
+    fi
+
+    # Decode percent-encoded path components (e.g., %20 => space).
+    if [[ "$RAW_FILE_ARG" == *%* ]]; then
+        RAW_FILE_ARG=$(printf '%b' "${RAW_FILE_ARG//%/\\x}")
+    fi
+
+    echo "$RAW_FILE_ARG"
+}
+
+# Name: 'waMapUnixPathToWindowsShare'
+# Role: Convert a UNIX file path into an accessible \tsclient path and required drive args.
+function waMapUnixPathToWindowsShare() {
+    local UNIX_PATH="$1"
+
+    WA_FILE_DRIVE_ARGS=()
+
+    if [[ "$UNIX_PATH" == "$HOME"* ]]; then
+        WA_WINDOWS_FILE_PATH=$(echo "$UNIX_PATH" | sed -e 's|^'"${HOME}"'|\\\\tsclient\\home|' -e 's|/|\\|g')
+        return
+    fi
+
+    if [ -n "$REMOVABLE_MEDIA" ] && [[ "$UNIX_PATH" == "$REMOVABLE_MEDIA"* ]]; then
+        WA_WINDOWS_FILE_PATH=$(echo "$UNIX_PATH" | sed -e 's|^'"${REMOVABLE_MEDIA}"'|\\\\tsclient\\media|' -e 's|/|\\|g')
+        WA_FILE_DRIVE_ARGS+=("/drive:media,${REMOVABLE_MEDIA}")
+        return
+    fi
+
+    # Fallback: expose host root and map arbitrary absolute paths via \tsclient\host.
+    WA_WINDOWS_FILE_PATH="${UNIX_PATH#/}"
+    WA_WINDOWS_FILE_PATH="\\\\tsclient\\host\\${WA_WINDOWS_FILE_PATH//\//\\}"
+    WA_FILE_DRIVE_ARGS+=("/drive:host,/")
+}
+
 # Name: 'waCheckGroupMembership'
 # Role: Ensures the current user is part of the required groups.
 function waCheckGroupMembership() {
@@ -976,12 +1018,11 @@ function waRunCommand() {
             FREERDP_PID=$!
             fi
         else
-            # Convert path from UNIX to Windows style.
-            FILE_PATH=$(echo "$2" | sed \
-                -e 's|^'"${HOME}"'|\\\\tsclient\\home|' \
-                -e 's|^'"${REMOVABLE_MEDIA}"'|\\\\tsclient\\media|' \
-                -e 's|/|\\|g')
-            dprint "UNIX_FILE_PATH: ${2}"
+            # Normalize and convert path from UNIX/URI to Windows redirected-drive path.
+            FILE_PATH=$(waNormalizeFileArg "$2")
+            waMapUnixPathToWindowsShare "$FILE_PATH"
+            FILE_PATH="$WA_WINDOWS_FILE_PATH"
+            dprint "UNIX_FILE_PATH: $(waNormalizeFileArg "$2")"
             dprint "WINDOWS_FILE_PATH: ${FILE_PATH}"
             ACTIVE_FREERDP_COMMAND="$FREERDP_COMMAND_REMOTEAPP"
 
@@ -995,7 +1036,7 @@ function waRunCommand() {
                     ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
                     /scale:"$RDP_SCALE" \
                     +auto-reconnect \
-                    /drive:media,"$REMOVABLE_MEDIA" \
+                    "${WA_FILE_DRIVE_ARGS[@]}" \
                     /wm-class:"$FULL_NAME" \
                     "${WA_REMOTEAPP_ARGS[@]}" \
                     /v:"$RDP_IP" &>/dev/null &
@@ -1012,7 +1053,7 @@ function waRunCommand() {
                 ${RDP_PASSWORD_ARG:+"$RDP_PASSWORD_ARG"} \
                 /scale:"$RDP_SCALE" \
                 +auto-reconnect \
-                /drive:media,"$REMOVABLE_MEDIA" \
+                "${WA_FILE_DRIVE_ARGS[@]}" \
                 /wm-class:"$FULL_NAME" \
                 "${WA_REMOTEAPP_ARGS[@]}" \
                 /v:"$RDP_IP" &>/dev/null &
