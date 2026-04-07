@@ -1687,7 +1687,8 @@ function waFindInstalled() {
     # Run the PowerShell scanner locally, then copy all outputs back to Linux with retries.
     # shellcheck disable=SC2129 # Silence warning regarding repeated redirects.
     echo "COPY /Y ${STAGE_PS_PATH_WIN} \"%WA_TMP_PS%\" >NUL" >>"$BATCH_SCRIPT_PATH"
-    echo "powershell.exe -ExecutionPolicy Bypass -File \"%WA_TMP_PS%\" > \"%WA_TMP_DET%\"" >>"$BATCH_SCRIPT_PATH"
+    # Suppress PowerShell stderr so non-fatal scan errors do not corrupt bash-formatted output.
+    echo "powershell.exe -ExecutionPolicy Bypass -File \"%WA_TMP_PS%\" 1> \"%WA_TMP_DET%\" 2> NUL" >>"$BATCH_SCRIPT_PATH"
     echo "SET /A WA_TRIES=0" >>"$BATCH_SCRIPT_PATH"
     echo ":WA_COPY_BACK" >>"$BATCH_SCRIPT_PATH"
     echo "COPY /Y \"%WA_TMP_INST%\" ${STAGE_INST_PATH_WIN} >NUL" >>"$BATCH_SCRIPT_PATH"
@@ -2077,6 +2078,7 @@ function waConfigureDetectedApps() {
     local SELECTED_APPS=()          # Detected applications selected by the user.
     local APP_DESKTOP_FILE=""       # Stores the '.desktop' file used to launch the application.
     local TEMP_ARRAY=()             # Temporary array used for sorting elements of an array.
+    local SANITIZED_DETECTED_PATH="" # Stores path to a sanitized copy of detected-app data.
 
     if [ -f "$DETECTED_FILE_PATH" ]; then
         # On UNIX systems, lines are terminated with a newline character (\n).
@@ -2084,12 +2086,26 @@ function waConfigureDetectedApps() {
         # Remove all carriage returns (\r) within the 'detected' file, as the file was written by Windows.
         sed -i 's/\r//g' "$DETECTED_FILE_PATH"
 
+        # Keep only expected bash array assignments to avoid sourcing scanner stderr/noise.
+        SANITIZED_DETECTED_PATH=$(mktemp)
+        if ! grep -E '^(NAMES|EXES|ICONS)=\(\)$|^(NAMES|EXES|ICONS)\+=\(".*"\)$' "$DETECTED_FILE_PATH" >"$SANITIZED_DETECTED_PATH"; then
+            rm -f "$SANITIZED_DETECTED_PATH"
+            SANITIZED_DETECTED_PATH=""
+        fi
+
         # Import the detected application information:
         # - Application Names               (NAMES)
         # - Application Icons in base64     (ICONS)
         # - Application Executable Paths    (EXES)
         # shellcheck source=/dev/null # Exclude this file from being checked by ShellCheck.
-        source "$DETECTED_FILE_PATH"
+        if [ -n "$SANITIZED_DETECTED_PATH" ] && [ -s "$SANITIZED_DETECTED_PATH" ]; then
+            source "$SANITIZED_DETECTED_PATH"
+            rm -f "$SANITIZED_DETECTED_PATH"
+        else
+            # If sanitation produced nothing useful, skip detected apps gracefully.
+            rm -f "$SANITIZED_DETECTED_PATH"
+            return 0
+        fi
 
         # shellcheck disable=SC2153 # Silence warnings regarding possible misspellings.
         for INDEX in "${!NAMES[@]}"; do
